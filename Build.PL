@@ -36,6 +36,11 @@ my $build = Module::Build->new(
 
 		# MyAPI::Server::ThriftAMQP
 		'Net::IP' => 0,
+
+		# PoCo::Server::HTTPs & proxy
+		'Data::UUID' => 0,
+		'POE::Component::Server::HTTP' => 0,
+		'IO::Socket::SSL' => 0,
 	},
 	create_makefile_pl => 'small',
 );
