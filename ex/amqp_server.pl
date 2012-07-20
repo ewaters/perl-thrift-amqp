@@ -18,9 +18,10 @@ use MyAPI::Server::ThriftAMQP;
 	}
 
 	sub method_add {
-		my ($self) = @_;
+		my ($self, $method) = @_;
+		my %args = $method->args('dereference');
 
-		die "I'm here!\n";
+		$method->set_result($args{num1} + $args{num2});
 	}
 }
 
