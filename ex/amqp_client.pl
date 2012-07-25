@@ -8,7 +8,7 @@ use MyAPI::Client::ThriftAMQP;
 my $client = MyAPI::Client::ThriftAMQP->new(
 	ThriftIDL => $FindBin::Bin . '/../t/thrift/calculator.thrift',
 
-	Debug => 1,
+	Debug => $ENV{DEBUG} ? 1 : 0,
 	
 	# AMQP connection parameters
 	RemoteAddress => '127.0.0.1',

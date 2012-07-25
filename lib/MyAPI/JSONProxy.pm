@@ -31,17 +31,23 @@ use Scalar::Util qw(blessed);
 use Params::Validate qw(validate validate_with);
 use Time::HiRes qw();
 
+use Log::Log4perl qw(get_logger :levels);
+use Log::Log4perl::Appender;
+use Log::Log4perl::Layout;
+use Log::Dispatch::Syslog;
+
 ## Configuration
 
 my %opt = (
     http_server_port => 3016,
     alias => 'apiproxy',
 
-    ThriftIDL => undef,
-    KeyFile => undef,
-    CertFile => undef,
-    VirtualHost => undef,
+    thrift_idl => undef,
+    ssl_key => undef,
+    ssl_cert => undef,
+    amq_virtual_host   => undef,
     amq_remote_address => undef,
+	amq_port           => undef,
     amq_ssl            => undef,
 
     # To allow MyAPI::JSONProxy to inject the 'JSONProxy-Remote-IP' header, at the API::Provider end
@@ -70,8 +76,9 @@ Returns a logger
 =cut
 
 sub log {
-	# FIXME
-    return $logger;
+	my $class = shift;
+	$logger ||= $class->create_logger();
+	return $logger;
 }
 
 =head2 config
@@ -100,9 +107,9 @@ sub run {
     validate_with(
         params => \%opt,
         spec => {
-            ThriftIDL => { callbacks => { 'is_file' => sub { -f shift } } },
-            KeyFile   => { callbacks => { 'is_file' => sub { -f shift } } },
-            CertFile  => { callbacks => { 'is_file' => sub { -f shift } } },
+            thrift_idl => { callbacks => { 'is_file' => sub { -f shift } } },
+            ssl_key   => { callbacks => { 'is_file' => sub { -f shift } } },
+            ssl_cert  => { callbacks => { 'is_file' => sub { -f shift } } },
         },
         allow_extra => 1,
     );
@@ -156,8 +163,8 @@ sub start {
             },
         },
         SSL => {
-            KeyFile => $heap->{KeyFile},
-            CertFile => $heap->{CertFile},
+            KeyFile => $heap->{ssl_key},
+            CertFile => $heap->{ssl_cert},
         },
     );
 
@@ -165,13 +172,16 @@ sub start {
         Logger      => $heap->{logger},
         Keepalive   => 60 * 5,
         Debug       => ($ENV{DEBUG} ? 1 : 0),
-        ThriftIDL   => $heap->{ThriftIDL},
-        VirtualHost => $heap->{VirtualHost},
+        ThriftIDL   => $heap->{thrift_idl},
+        VirtualHost => $heap->{amq_virtual_host},
         ($heap->{amq_remote_address} ? (
         RemoteAddress => $heap->{amq_remote_address},
         ) : ()),
         (defined $heap->{amq_ssl} ? (
         SSL => $heap->{amq_ssl},
+        ) : ()),
+        (defined $heap->{amq_port} ? (
+        RemotePort => $heap->{amq_port},
         ) : ()),
         Reconnect => 1,
     );
@@ -198,18 +208,24 @@ sub http_server_default_handler {
 
     my ($data, %headers);
     eval {
-        if (! $request->header('Content-Type') || $request->header('Content-Type') !~ m{^application/json\b}) {
-            die "Invalid 'Content-Type' header; must be 'application/json'\n";
-        }
+		# Was content sent?
+		if ($request->header('Content-Type')) {
+			if ($request->header('Content-Type') !~ m{^application/json\b}) {
+				die "Invalid 'Content-Type' header; must be 'application/json'\n";
+			}
 
-        my $payload = $request->content;
-
-        # Decode the payload
-
-        eval { $data = $json_xs->decode($payload) };
-        if ($@) {
-            die "Failed to decode JSON data in request payload: $@\n";
-        }
+			# Decode the payload
+			my $payload = $request->content;
+			eval { $data = $json_xs->decode($payload) };
+			if ($@) {
+				die "Failed to decode JSON data in request payload: $@\n";
+			}
+		}
+		# Perhaps encoded on the URI
+		else {
+			my %query_parameters = $request->uri->query_form();
+			$data = \%query_parameters;
+		}
     };
     if (my $ex = $@) {
         $heap->{logger}->error($ex);
@@ -228,13 +244,13 @@ sub http_server_default_handler {
     my $id = $data_uuid->create_str;
     
     my $api_request = {
-        start => Time::HiRes::time,
-        request => $request,
+        start    => Time::HiRes::time,
+        request  => $request,
         response => $response,
-        ip => $ip,
-        data => $data,
+        ip       => $ip,
+        data     => $data,
         header_data => \%headers,
-        id => $id,
+        id       => $id,
     };
     $api_request->{times}{start} = $api_request->{start};
     $response->streaming(1);
@@ -273,7 +289,7 @@ sub start_request {
     $service =~ s{\..+}{};
 
 	# FIXME How do we find the method class?
-    my $method_class = join '::', 'MyAPI', $service, $method;
+    my $method_class = join '::', 'Services', $service, $method;
     $details->{method_class} = $method_class;
 
     if ($ENV{DEBUG}) {
@@ -497,6 +513,62 @@ EOF
     $response->code(RC_OK);
     $response->content($content);
     return RC_OK;
+}
+
+=head2 create_logger ()
+
+=cut
+
+sub create_logger {
+    my $class = shift;
+    my %config = %{ $class->config };
+
+    if (! grep { defined $config{"log_$_"} } qw(screen syslog file)) {
+        print STDERR "No log destination found in config ('log_screen', 'log_syslog' or 'log_file').  Defaulting to 'log_screen'\n";
+        $config{log_screen} = 1;
+    }
+
+    my $logger = Log::Log4perl->get_logger($class);
+    $logger->level($DEBUG);
+
+    my %data = ( logger => $logger );
+
+    if ($config{log_screen}) {
+        my $appender = Log::Log4perl::Appender->new(
+            'Log::Log4perl::Appender::Screen',
+            name => 'screenlog',
+            stderr => 1,
+        );
+        $appender->layout( Log::Log4perl::Layout::PatternLayout->new("[\%d] \%P \%p: \%m\%n") );
+        $appender->threshold($config{log_debug} || $config{log_screen_debug} ? $DEBUG : $INFO);
+        $logger->add_appender($appender);
+    }
+    if ($config{log_syslog}) {
+        my $appender = Log::Log4perl::Appender->new(
+            'Log::Dispatch::Syslog',
+            name => 'syslog',
+            ident => $class,
+            logopt => 'pid',
+            min_level => 'info',
+            facility => 'local4',
+        );
+        $appender->layout( Log::Log4perl::Layout::PatternLayout->new("\%m\%n") );
+        $appender->threshold($config{log_debug} || $config{log_syslog_debug} ? $DEBUG : $INFO);
+        $logger->add_appender($appender);
+    }
+    if ($config{log_file}) {
+        my $appender = Log::Log4perl::Appender->new(
+            'Log::Log4perl::Appender::File',
+            name => 'filelog',
+            mode => 'append',
+            filename => $config{log_file},
+        );
+        $appender->layout( Log::Log4perl::Layout::PatternLayout->new("[\%d] \%P \%p: \%m\%n") );
+        $appender->threshold($config{log_debug} || $config{log_file_debug} ? $DEBUG : $INFO);
+        $logger->add_appender($appender);
+    }
+
+	return $logger;
 }
 
 =head1 AUTHOR
