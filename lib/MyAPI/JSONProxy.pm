@@ -39,15 +39,14 @@ use Log::Dispatch::Syslog;
 ## Configuration
 
 my %opt = (
-    http_server_port => 3016,
-    alias => 'apiproxy',
-
-    thrift_idl => undef,
-    ssl_key => undef,
-    ssl_cert => undef,
+    http_server_port   => 3016,
+    alias              => 'apiproxy',
+    thrift_idl         => undef,
+    ssl_key            => undef,
+    ssl_cert           => undef,
     amq_virtual_host   => undef,
     amq_remote_address => undef,
-	amq_port           => undef,
+	amq_remote_port    => undef,
     amq_ssl            => undef,
 
     # To allow MyAPI::JSONProxy to inject the 'JSONProxy-Remote-IP' header, at the API::Provider end
@@ -108,8 +107,8 @@ sub run {
         params => \%opt,
         spec => {
             thrift_idl => { callbacks => { 'is_file' => sub { -f shift } } },
-            ssl_key   => { callbacks => { 'is_file' => sub { -f shift } } },
-            ssl_cert  => { callbacks => { 'is_file' => sub { -f shift } } },
+            ssl_key    => { callbacks => { 'is_file' => sub { -f shift } } },
+            ssl_cert   => { callbacks => { 'is_file' => sub { -f shift } } },
         },
         allow_extra => 1,
     );
@@ -177,14 +176,17 @@ sub start {
         ($heap->{amq_remote_address} ? (
         RemoteAddress => $heap->{amq_remote_address},
         ) : ()),
+        ($heap->{amq_remote_port} ? (
+        RemotePort => $heap->{amq_remote_port},
+        ) : ()),
         (defined $heap->{amq_ssl} ? (
         SSL => $heap->{amq_ssl},
         ) : ()),
-        (defined $heap->{amq_port} ? (
-        RemotePort => $heap->{amq_port},
-        ) : ()),
         Reconnect => 1,
     );
+	
+	# Figure out what Perl namespace was used in the thrift IDL
+	$heap->{message_namespace} = $heap->{myapi_client}{idl}->headers->[0]->namespace('perl');
 
     $heap->{logger}->info("Connect to the API proxy on the HTTPS port $opt{http_server_port}");
 }
@@ -288,8 +290,7 @@ sub start_request {
     my $service = $queue_name;
     $service =~ s{\..+}{};
 
-	# FIXME How do we find the method class?
-    my $method_class = join '::', 'Services', $service, $method;
+    my $method_class = join '::', $heap->{message_namespace}, $service, $method;
     $details->{method_class} = $method_class;
 
     if ($ENV{DEBUG}) {

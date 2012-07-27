@@ -13,6 +13,6 @@ MyAPI::JSONProxy->run({
     thrift_idl       => $FindBin::Bin . '/../t/thrift/calculator.thrift',
     ssl_key          => $FindBin::Bin . '/ssl.key',
     ssl_cert         => $FindBin::Bin . '/ssl.crt',
-	amq_port         => 5672,
+	amq_remote_port  => 5672,
 	amq_ssl          => 0,
 });
